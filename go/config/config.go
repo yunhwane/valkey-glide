@@ -196,6 +196,7 @@ type baseClientConfiguration struct {
 	reconnectStrategy *BackoffStrategy
 	lazyConnect       bool
 	DatabaseId        *int `json:"database_id,omitempty"`
+	clientSideCache   *ClientSideCache
 }
 
 func (config *baseClientConfiguration) toProtobuf() (*protobuf.ConnectionRequest, error) {
@@ -248,6 +249,10 @@ func (config *baseClientConfiguration) toProtobuf() (*protobuf.ConnectionRequest
 
 	if config.DatabaseId != nil {
 		request.DatabaseId = uint32(*config.DatabaseId)
+	}
+
+	if config.clientSideCache != nil {
+		request.ClientSideCache = config.clientSideCache.toProtobuf()
 	}
 
 	return &request, nil
@@ -466,6 +471,16 @@ func (config *ClientConfiguration) WithSubscriptionConfig(
 	return config
 }
 
+// WithClientSideCache sets the client-side cache configuration for the client.
+// When provided, the client will use local caching to reduce network round-trips
+// and server load for cacheable read commands.
+func (config *ClientConfiguration) WithClientSideCache(
+	clientSideCache *ClientSideCache,
+) *ClientConfiguration {
+	config.clientSideCache = clientSideCache
+	return config
+}
+
 func (config *ClientConfiguration) HasSubscription() bool {
 	return config.subscriptionConfig != nil && len(config.subscriptionConfig.subscriptions) > 0
 }
@@ -640,6 +655,16 @@ func (config *ClusterClientConfiguration) WithSubscriptionConfig(
 	subscriptionConfig *ClusterSubscriptionConfig,
 ) *ClusterClientConfiguration {
 	config.subscriptionConfig = subscriptionConfig
+	return config
+}
+
+// WithClientSideCache sets the client-side cache configuration for the cluster client.
+// When provided, the client will use local caching to reduce network round-trips
+// and server load for cacheable read commands.
+func (config *ClusterClientConfiguration) WithClientSideCache(
+	clientSideCache *ClientSideCache,
+) *ClusterClientConfiguration {
+	config.clientSideCache = clientSideCache
 	return config
 }
 
