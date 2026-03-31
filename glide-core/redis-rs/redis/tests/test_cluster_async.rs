@@ -674,6 +674,222 @@ mod cluster_async {
         });
     }
 
+    /// Helper to find a span attribute value by key from the span JSON's `span_attributes` array.
+    /// Attributes are stored as `[{"key": "value"}, ...]`.
+    fn find_span_attribute<'a>(
+        span: &'a serde_json::Value,
+        key: &str,
+    ) -> Option<&'a serde_json::Value> {
+        span["span_attributes"]
+            .as_array()?
+            .iter()
+            .find_map(|attr| attr.as_object().and_then(|obj| obj.get(key)))
+    }
+
+    /// Helper to read the spans file and find a span by name.
+    fn read_span_from_file(span_name: &str) -> serde_json::Value {
+        let file_content =
+            std::fs::read_to_string(SPANS_JSON).expect("Failed to read spans JSON file");
+        file_content
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|span| span["name"] == span_name)
+            .unwrap_or_else(|| panic!("Span '{span_name}' not found in spans file"))
+    }
+
+    /// Helper to extract the server.port from a span's attributes as u16.
+    fn get_span_server_port(span: &serde_json::Value) -> u16 {
+        find_span_attribute(span, "server.port")
+            .expect("server.port attribute not found")
+            .as_str()
+            .unwrap()
+            .parse()
+            .expect("server.port should be a valid port number")
+    }
+
+    /// Sends two commands to different cluster nodes and verifies that each span's
+    /// `server.port` reflects the actual routed node, not a fixed initial value.
+    #[test]
+    #[serial_test::serial]
+    fn test_async_open_telemetry_cluster_routed_node_address() {
+        let rt = shared_runtime();
+        rt.block_on(async {
+            let _ = std::fs::remove_file(SPANS_JSON);
+            init_otel().await.unwrap();
+
+            let cluster = TestClusterContext::new(3, 0);
+            let mut connection = cluster.async_connection(None).await;
+
+            // Get slot distribution to find slots owned by different nodes
+            let cluster_nodes = cluster.get_cluster_nodes().await;
+            let slot_distribution = cluster.get_slots_ranges_distribution(&cluster_nodes);
+            // slot_distribution: Vec<(node_id, host, port, Vec<[start, end]>)>
+            assert!(
+                slot_distribution.len() >= 2,
+                "Need at least 2 nodes for this test"
+            );
+
+            // Pick a slot from the first node and a slot from the second node
+            let node1_port: u16 = slot_distribution[0].2.parse().unwrap();
+            let node2_port: u16 = slot_distribution[1].2.parse().unwrap();
+            assert_ne!(node1_port, node2_port, "Nodes must have different ports");
+
+            let slot_on_node1 = slot_distribution[0].3[0][0];
+            let slot_on_node2 = slot_distribution[1].3[0][0];
+
+            // Command 1: route to node 1
+            let span1 = GlideOpenTelemetry::new_span("routed_to_node1");
+            let mut cmd1 = redis::cmd("SET");
+            cmd1.arg("k1").arg("v1");
+            cmd1.set_span(Some(span1));
+            connection
+                .route_command(
+                    &cmd1,
+                    RoutingInfo::SingleNode(SingleNodeRoutingInfo::SpecificNode(Route::new(
+                        slot_on_node1,
+                        SlotAddr::Master,
+                    ))),
+                )
+                .await
+                .expect("SET to node1 failed");
+            cmd1.span().unwrap().end();
+
+            // Command 2: route to node 2
+            let span2 = GlideOpenTelemetry::new_span("routed_to_node2");
+            let mut cmd2 = redis::cmd("SET");
+            cmd2.arg("k2").arg("v2");
+            cmd2.set_span(Some(span2));
+            connection
+                .route_command(
+                    &cmd2,
+                    RoutingInfo::SingleNode(SingleNodeRoutingInfo::SpecificNode(Route::new(
+                        slot_on_node2,
+                        SlotAddr::Master,
+                    ))),
+                )
+                .await
+                .expect("SET to node2 failed");
+            cmd2.span().unwrap().end();
+
+            // Wait for span flush
+            sleep(Duration::from_millis(PUBLISH_TIME + 500).into()).await;
+
+            // Verify: each span's port matches the node it was routed to
+            let test_span1 = read_span_from_file("routed_to_node1");
+            let test_span2 = read_span_from_file("routed_to_node2");
+
+            let port1 = get_span_server_port(&test_span1);
+            let port2 = get_span_server_port(&test_span2);
+
+            assert_eq!(
+                port1, node1_port,
+                "Span routed_to_node1: expected port {node1_port}, got {port1}"
+            );
+            assert_eq!(
+                port2, node2_port,
+                "Span routed_to_node2: expected port {node2_port}, got {port2}"
+            );
+            // This proves set_routed_node_on_span overwrites the initial value,
+            // because two commands routed to different nodes show different ports.
+            assert_ne!(
+                port1, port2,
+                "Ports must differ to prove per-command routing attribution"
+            );
+        });
+    }
+
+    /// Same as the command test but for pipelines.
+    #[test]
+    #[serial_test::serial]
+    fn test_async_open_telemetry_cluster_routed_node_address_pipeline() {
+        let rt = shared_runtime();
+        rt.block_on(async {
+            let _ = std::fs::remove_file(SPANS_JSON);
+            init_otel().await.unwrap();
+
+            let cluster = TestClusterContext::new(3, 0);
+            let mut connection = cluster.async_connection(None).await;
+
+            let cluster_nodes = cluster.get_cluster_nodes().await;
+            let slot_distribution = cluster.get_slots_ranges_distribution(&cluster_nodes);
+            assert!(
+                slot_distribution.len() >= 2,
+                "Need at least 2 nodes for this test"
+            );
+
+            let node1_port: u16 = slot_distribution[0].2.parse().unwrap();
+            let node2_port: u16 = slot_distribution[1].2.parse().unwrap();
+            let slot_on_node1 = slot_distribution[0].3[0][0];
+            let slot_on_node2 = slot_distribution[1].3[0][0];
+
+            // Pipeline 1: route to node 1
+            let span1 = GlideOpenTelemetry::new_span("pipeline_to_node1");
+            let mut pipe1 = redis::pipe();
+            pipe1.atomic();
+            pipe1.set_pipeline_span(Some(span1.clone()));
+            pipe1.cmd("SET").arg("pk1").arg("v1");
+            pipe1.cmd("GET").arg("pk1");
+            connection
+                .route_pipeline(
+                    &pipe1,
+                    0,
+                    pipe1.cmd_iter().count(),
+                    Some(SingleNodeRoutingInfo::SpecificNode(Route::new(
+                        slot_on_node1,
+                        SlotAddr::Master,
+                    ))),
+                    None,
+                )
+                .await
+                .expect("Pipeline to node1 failed");
+            span1.end();
+
+            // Pipeline 2: route to node 2
+            let span2 = GlideOpenTelemetry::new_span("pipeline_to_node2");
+            let mut pipe2 = redis::pipe();
+            pipe2.atomic();
+            pipe2.set_pipeline_span(Some(span2.clone()));
+            pipe2.cmd("SET").arg("pk2").arg("v2");
+            pipe2.cmd("GET").arg("pk2");
+            connection
+                .route_pipeline(
+                    &pipe2,
+                    0,
+                    pipe2.cmd_iter().count(),
+                    Some(SingleNodeRoutingInfo::SpecificNode(Route::new(
+                        slot_on_node2,
+                        SlotAddr::Master,
+                    ))),
+                    None,
+                )
+                .await
+                .expect("Pipeline to node2 failed");
+            span2.end();
+
+            sleep(Duration::from_millis(PUBLISH_TIME + 500).into()).await;
+
+            let test_span1 = read_span_from_file("pipeline_to_node1");
+            let test_span2 = read_span_from_file("pipeline_to_node2");
+
+            let port1 = get_span_server_port(&test_span1);
+            let port2 = get_span_server_port(&test_span2);
+
+            assert_eq!(
+                port1, node1_port,
+                "Span pipeline_to_node1: expected port {node1_port}, got {port1}"
+            );
+            assert_eq!(
+                port2, node2_port,
+                "Span pipeline_to_node2: expected port {node2_port}, got {port2}"
+            );
+            assert_ne!(
+                port1, port2,
+                "Ports must differ to prove per-command routing attribution"
+            );
+        });
+    }
+
     #[tokio::test]
     async fn test_routing_by_slot_to_replica_with_az_affinity_strategy_to_half_replicas() {
         test_az_affinity_helper(StrategyVariant::AZAffinity).await;
@@ -739,7 +955,7 @@ mod cluster_async {
             .read_from(strategy)
             .build()
             .unwrap()
-            .get_async_connection(None, None)
+            .get_async_connection(None, None, None)
             .await
             .unwrap();
 
@@ -842,7 +1058,7 @@ mod cluster_async {
             .read_from(strategy)
             .build()
             .unwrap()
-            .get_async_connection(None, None)
+            .get_async_connection(None, None, None)
             .await
             .unwrap();
 
@@ -947,7 +1163,7 @@ mod cluster_async {
             )
             .build()
             .unwrap()
-            .get_async_connection(None, None)
+            .get_async_connection(None, None, None)
             .await
             .unwrap();
 
@@ -1125,7 +1341,7 @@ mod cluster_async {
             let client = ClusterClient::builder(cluster_addresses.clone())
                 .read_from_replicas()
                 .build()?;
-            let mut connection = client.get_async_connection(None, None).await?;
+            let mut connection = client.get_async_connection(None, None, None).await?;
 
             let route_to_all_nodes = redis::cluster_routing::MultipleNodeRoutingInfo::AllNodes;
             let routing = RoutingInfo::MultiNode((route_to_all_nodes, None));
@@ -2162,7 +2378,7 @@ mod cluster_async {
                         .build()
                         .unwrap();
 
-                let mut conn = client.get_async_connection(None, None).await.unwrap();
+                let mut conn = client.get_async_connection(None, None, None).await.unwrap();
 
                 // Disable full coverage requirement
                 let _ = conn
@@ -4307,10 +4523,9 @@ mod cluster_async {
             let completed = completed.clone();
             move |cmd: &[u8], _| {
                 respond_startup_two_nodes(name, cmd)?;
-                // Error twice with io-error, ensure connection is reestablished w/out calling
-                // other node (i.e., not doing a full slot rebuild)
+                // Use TypeError which has NoRetry behavior
                 completed.fetch_add(1, Ordering::SeqCst);
-                Err(Err((ErrorKind::ReadOnly, "").into()))
+                Err(Err((ErrorKind::TypeError, "").into()))
             }
         });
 
@@ -4323,11 +4538,94 @@ mod cluster_async {
         match value {
             Ok(_) => panic!("result should be an error"),
             Err(e) => match e.kind() {
-                ErrorKind::ReadOnly => {}
-                _ => panic!("Expected ReadOnly but got {:?}", e.kind()),
+                ErrorKind::TypeError => {}
+                _ => panic!("Expected TypeError but got {:?}", e.kind()),
             },
         }
         assert_eq!(completed.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_async_cluster_readonly_error_should_refresh_slots_and_retry() {
+        let name = "test_async_cluster_readonly_error_should_refresh_slots_and_retry";
+        let requests = Arc::new(AtomicI32::new(0));
+        let MockEnv {
+            async_connection: mut connection,
+            handler: _handler,
+            runtime,
+            ..
+        } = MockEnv::with_client_builder(
+            ClusterClient::builder(vec![&*format!("redis://{name}")]).retries(3),
+            name,
+            {
+                let requests = requests.clone();
+                move |cmd: &[u8], _| {
+                    respond_startup_two_nodes(name, cmd)?;
+                    let count = requests.fetch_add(1, Ordering::SeqCst);
+                    match count {
+                        // First request fails with ReadOnly (simulating failover)
+                        0 => Err(Err((
+                            ErrorKind::ReadOnly,
+                            "READONLY You can't write against a read only replica",
+                        )
+                            .into())),
+                        // After slot refresh, retry succeeds
+                        _ => Err(Ok(Value::BulkString(b"123".to_vec()))),
+                    }
+                }
+            },
+        );
+
+        let value = runtime.block_on(
+            cmd("GET")
+                .arg("test")
+                .query_async::<_, Option<i32>>(&mut connection),
+        );
+
+        assert_eq!(value, Ok(Some(123)));
+        assert!(
+            requests.load(Ordering::SeqCst) >= 2,
+            "Should have retried after ReadOnly error"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_async_cluster_readonly_error_exhausts_retries() {
+        let name = "test_async_cluster_readonly_error_exhausts_retries";
+        let requests = Arc::new(AtomicI32::new(0));
+        let MockEnv {
+            async_connection: mut connection,
+            handler: _handler,
+            runtime,
+            ..
+        } = MockEnv::with_client_builder(
+            ClusterClient::builder(vec![&*format!("redis://{name}")]).retries(2),
+            name,
+            {
+                let requests = requests.clone();
+                move |cmd: &[u8], _| {
+                    respond_startup_two_nodes(name, cmd)?;
+                    requests.fetch_add(1, Ordering::SeqCst);
+                    // Always return ReadOnly to exhaust retries
+                    Err(Err((ErrorKind::ReadOnly, "READONLY").into()))
+                }
+            },
+        );
+
+        let value = runtime.block_on(
+            cmd("GET")
+                .arg("test")
+                .query_async::<_, Option<i32>>(&mut connection),
+        );
+
+        match value {
+            Ok(_) => panic!("result should be an error"),
+            Err(e) => assert_eq!(e.kind(), ErrorKind::ReadOnly),
+        }
+        // Initial attempt + 2 retries = 3 total
+        assert_eq!(requests.load(Ordering::SeqCst), 3);
     }
 
     #[test]
@@ -4740,9 +5038,10 @@ mod cluster_async {
             let res = con_tx
                 .route_command(
                     &cmd_id,
-                    RoutingInfo::SingleNode(SingleNodeRoutingInfo::SpecificNode(
-                        Route::new(keyslot_bar, SlotAddr::Master),
-                    )),
+                    RoutingInfo::SingleNode(SingleNodeRoutingInfo::SpecificNode(Route::new(
+                        keyslot_bar,
+                        SlotAddr::Master,
+                    ))),
                 )
                 .await;
             let client_id = match res.unwrap() {
@@ -4775,7 +5074,10 @@ mod cluster_async {
                         &pipe,
                         0,
                         2,
-                        Some(SingleNodeRoutingInfo::SpecificNode(Route::new(keyslot_bar, SlotAddr::Master))),
+                        Some(SingleNodeRoutingInfo::SpecificNode(Route::new(
+                            keyslot_bar,
+                            SlotAddr::Master,
+                        ))),
                         None,
                     )
                     .await;
@@ -4789,12 +5091,33 @@ mod cluster_async {
             {
                 let mut trigger_set_cmd = redis::cmd("SET");
                 trigger_set_cmd.arg("bar").arg("123");
-                let trigger_res =
-                    trigger_set_cmd.query_async::<_, String>(&mut con_tx).await;
+                let trigger_res = trigger_set_cmd.query_async::<_, String>(&mut con_tx).await;
                 match trigger_res {
-                    Ok(_) => panic!("Unexpected success on SET to blocked shard; expected ConnectionNotFoundForRoute error"),
+                    Ok(val) => {
+                        // With bounded response_timeout, reconnection may complete
+                        // before the error is returned. Verify the SET actually persisted.
+                        assert_eq!(
+                            val, "OK",
+                            "SET to blocked shard should return OK if it succeeds"
+                        );
+                        let get_res: String = redis::cmd("GET")
+                            .arg("bar")
+                            .query_async(&mut con_tx)
+                            .await
+                            .expect("GET after successful SET should not fail");
+                        assert_eq!(
+                            get_res, "123",
+                            "GET should return the value SET during reconnection"
+                        );
+                    }
                     Err(e) => {
-                        if !e.to_string().contains("ConnectionNotFoundForRoute") {
+                        let err_str = e.to_string();
+                        if !err_str.contains("ConnectionNotFoundForRoute")
+                            && !err_str.contains("timed out")
+                            && !e.is_connection_dropped()
+                            && e.kind() != ErrorKind::AllConnectionsUnavailable
+                            && e.kind() != ErrorKind::FatalSendError
+                        {
                             panic!("Unexpected error on SET to blocked shard: {e:?}");
                         }
                     }
@@ -4806,13 +5129,11 @@ mod cluster_async {
             {
                 let mut healthy_set_cmd = redis::cmd("SET");
                 healthy_set_cmd.arg("foo").arg("123");
-                let healthy_res =
-                    healthy_set_cmd.query_async::<_, String>(&mut con_tx).await;
+                let healthy_res = healthy_set_cmd.query_async::<_, String>(&mut con_tx).await;
                 match healthy_res {
                     Ok(result) => {
                         assert_eq!(
-                            result,
-                            "OK",
+                            result, "OK",
                             "Healthy shard (slot 12182) did not return OK as expected"
                         );
                     }
@@ -5325,12 +5646,12 @@ mod cluster_async {
                 if contains_slice(cmd, b"PING") {
                     let connect_attempt = ping_attempts_clone.fetch_add(1, Ordering::Relaxed);
                     let past_get_attempts = get_attempts.load(Ordering::Relaxed);
-                    // We want connection checks to fail after the first GET attempt, until it retries. Hence, we wait for 5 PINGs -
+                    // We want connection checks to fail after the first GET attempt, until it retries. Hence, we expect 4-5 PINGs -
                     // 1. initial connection,
                     // 2. refresh slots on client creation,
                     // 3. refresh_connections `check_connection` after first GET failed,
                     // 4. refresh_connections `connect_and_check` after first GET failed,
-                    // 5. reconnect on 2nd GET attempt.
+                    // 5. reconnect on 2nd GET attempt (may not occur with non-blocking reconnection).
                     // more than 5 attempts mean that the server reconnects more than once, which is the behavior we're testing against.
                     if past_get_attempts != 1 || connect_attempt > 3 {
                         respond_startup_two_nodes(name, cmd)?;
@@ -5370,8 +5691,11 @@ mod cluster_async {
             assert_eq!(value, Ok(Some(123)));
         }
         // If you need to change the number here due to a change in the cluster, you probably also need to adjust the test.
-        // See the PING counts above to explain why 5 is the target number.
-        assert_eq!(ping_attempts.load(Ordering::Acquire), 5);
+        // See the PING counts above to explain why 4-5 is the expected range.
+        // With non-blocking reconnection, the reconnect path may complete with fewer PINGs
+        // since the poll loop isn't blocked waiting for reconnection futures.
+        let pings = ping_attempts.load(Ordering::Acquire);
+        assert!((4..=5).contains(&pings), "Expected 4-5 pings, got {pings}");
     }
 
     #[test]
@@ -6155,7 +6479,7 @@ mod cluster_async {
                 .unwrap();
 
             let mut connection = test_user_client
-                .get_async_connection(None, None)
+                .get_async_connection(None, None, None)
                 .await
                 .unwrap();
 
@@ -6219,7 +6543,7 @@ mod cluster_async {
             let cluster = TestClusterContext::new_with_mtls(3, 0);
             block_on_all(async move {
                 let client = create_cluster_client_from_cluster(&cluster, true).unwrap();
-                let mut connection = client.get_async_connection(None, None).await.unwrap();
+                let mut connection = client.get_async_connection(None, None, None).await.unwrap();
                 cmd("SET")
                     .arg("test")
                     .arg("test_data")
@@ -6242,7 +6566,7 @@ mod cluster_async {
             let cluster = TestClusterContext::new_with_mtls(3, 0);
             block_on_all(async move {
             let client = create_cluster_client_from_cluster(&cluster, false).unwrap();
-            let connection = client.get_async_connection(None, None).await;
+            let connection = client.get_async_connection(None, None, None).await;
             match cluster.cluster.servers.first().unwrap().connection_info() {
                 ConnectionInfo {
                     addr: redis::ConnectionAddr::TcpTls { .. },

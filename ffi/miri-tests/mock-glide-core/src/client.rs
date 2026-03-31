@@ -7,6 +7,9 @@ use redis::{Pipeline, PipelineRetryStrategy, ScanStateRC, Cmd, PushInfo, Value, 
 
 pub struct ConnectionError;
 
+/// Mock inflight tracker for Miri tests — no-op Drop.
+pub struct MockInflightTracker;
+
 use std::fmt;
 impl fmt::Display for ConnectionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -91,5 +94,10 @@ impl Client {
     /// Mock compression_manager method for Miri tests
     pub fn compression_manager(&self) -> Option<std::sync::Arc<crate::compression::CompressionManager>> {
         None
+    }
+
+    /// Mock reserve_inflight_request method for Miri tests
+    pub fn reserve_inflight_request(&self) -> Option<MockInflightTracker> {
+        Some(MockInflightTracker) // Always allow in mock
     }
 }

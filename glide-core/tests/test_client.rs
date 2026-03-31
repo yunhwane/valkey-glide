@@ -1,5 +1,6 @@
 // Copyright Valkey GLIDE Project Contributors - SPDX Identifier: Apache-2.0
 
+mod test_constants;
 mod utilities;
 
 #[macro_export]
@@ -51,6 +52,13 @@ pub(crate) mod shared_client_tests {
     #[cfg(feature = "iam_tests")]
     const MEMORYDB_CLUSTER_IAM_ENDPOINT: &str = "memorydb-cluster-iam.endpoint"; // Replace with your cluster endpoint
 
+    #[cfg(feature = "iam_tests")]
+    const TEST_STANDALONE_NAME: &str = "test-standalone";
+
+    // Import IAM test constants from test_constants module
+    #[cfg(feature = "iam_tests")]
+    use test_constants::{IAM_TEST_CLUSTER_NAME, IAM_TEST_REGION_US_EAST_1, IAM_USERNAME};
+
     struct TestBasics {
         server: BackingServer,
         client: Client,
@@ -98,6 +106,24 @@ pub(crate) mod shared_client_tests {
             let server = BackingServer::Standalone(test_basics.server);
             let client = create_client(&server, configuration).await;
             TestBasics { server, client }
+        }
+    }
+
+    #[cfg(feature = "iam_tests")]
+    fn setup_mock_aws_credentials() {
+        unsafe {
+            std::env::set_var("AWS_ACCESS_KEY_ID", "test_access_key");
+            std::env::set_var("AWS_SECRET_ACCESS_KEY", "test_secret_key");
+            std::env::set_var("AWS_SESSION_TOKEN", "test_session_token");
+        }
+    }
+
+    #[cfg(feature = "iam_tests")]
+    fn cleanup_mock_aws_credentials() {
+        unsafe {
+            std::env::remove_var("AWS_ACCESS_KEY_ID");
+            std::env::remove_var("AWS_SECRET_ACCESS_KEY");
+            std::env::remove_var("AWS_SESSION_TOKEN");
         }
     }
 
@@ -444,7 +470,7 @@ pub(crate) mod shared_client_tests {
 
             let cluster_name = "iam-auth-test"; // Replace with your ElastiCache cluster name
             let username = "iam-auth"; // Replace with your IAM username
-            let region = "us-east-1";
+            let region = IAM_TEST_REGION_US_EAST_1;
             let endpoint: &'static str = ELASTICACHE_CLUSTER_IAM_ENDPOINT; // Replace with your cluster endpoint
 
             // Use the provided endpoint and port
@@ -467,8 +493,7 @@ pub(crate) mod shared_client_tests {
             match client_result {
                 Ok(mut client) => {
                     // If the client is successfully created, try sending a command
-                    let result = client.send_command(&mut redis::cmd("PING"), None).await;
-                    assert!(result.is_ok(), "PING command should succeed: {result:?}");
+                    assert_connected(&mut client).await;
                 }
                 Err(err) => {
                     // In case of failure, print error and assert that it is not a non-connection/auth error
@@ -505,7 +530,7 @@ pub(crate) mod shared_client_tests {
 
             let cluster_name = "iam-auth-standalone"; // Replace with your ElastiCache cluster name
             let username = "iam-auth"; // Replace with your IAM username
-            let region = "us-east-1";
+            let region = IAM_TEST_REGION_US_EAST_1;
             let endpoint = ELASTICACHE_STANDALONE_IAM_ENDPOINT; // Replace with your standalone endpoint
 
             // Use the provided endpoint and port
@@ -528,8 +553,7 @@ pub(crate) mod shared_client_tests {
             match client_result {
                 Ok(mut client) => {
                     // If the client is successfully created, try sending a command
-                    let result = client.send_command(&mut redis::cmd("PING"), None).await;
-                    assert!(result.is_ok(), "PING command should succeed: {result:?}");
+                    assert_connected(&mut client).await;
                 }
                 Err(err) => {
                     // In case of failure, print error and assert that it is not a non-connection/auth error
@@ -566,7 +590,7 @@ pub(crate) mod shared_client_tests {
 
             let cluster_name = "iam-auth-test"; // Replace with your ElastiCache cluster name
             let username = "iam-auth-test"; // Replace with your IAM username
-            let region = "us-east-1";
+            let region = IAM_TEST_REGION_US_EAST_1;
             let endpoint = MEMORYDB_CLUSTER_IAM_ENDPOINT; // Replace with your cluster endpoint
 
             // Use the provided endpoint and port
@@ -589,8 +613,7 @@ pub(crate) mod shared_client_tests {
             match client_result {
                 Ok(mut client) => {
                     // If the client is successfully created, try sending a command
-                    let result = client.send_command(&mut redis::cmd("PING"), None).await;
-                    assert!(result.is_ok(), "PING command should succeed: {result:?}");
+                    assert_connected(&mut client).await;
                 }
                 Err(err) => {
                     // In case of failure, print error and assert that it is not a non-connection/auth error
@@ -627,7 +650,7 @@ pub(crate) mod shared_client_tests {
 
             let cluster_name = "iam-auth-test"; // Replace with your ElastiCache cluster name
             let username = "iam-auth"; // Replace with your IAM username
-            let region = "us-east-1";
+            let region = IAM_TEST_REGION_US_EAST_1;
             let endpoint = ELASTICACHE_CLUSTER_IAM_ENDPOINT; // Replace with your cluster endpoint
 
             // Use the provided endpoint and port
@@ -723,7 +746,7 @@ pub(crate) mod shared_client_tests {
 
             let cluster_name = "iam-auth-standalone"; // Replace with your standalone cluster name
             let username = "iam-auth"; // Replace with your IAM username
-            let region = "us-east-1";
+            let region = IAM_TEST_REGION_US_EAST_1;
             let endpoint = ELASTICACHE_STANDALONE_IAM_ENDPOINT; // Replace with your standalone endpoint
 
             // Use the provided endpoint and port
@@ -822,156 +845,84 @@ pub(crate) mod shared_client_tests {
     #[rstest]
     #[serial_test::serial]
     #[timeout(SHORT_CLUSTER_TEST_TIMEOUT)]
-    fn test_iam_cluster_reconnection_after_connection_kill() {
-        block_on_all(async {
-            remove_test_credentials();
-
-            let cluster_name = "iam-auth-test"; // Replace with your ElastiCache cluster name
-            let username = "iam-auth"; // Replace with your IAM username
-            let region = "us-east-1";
-            let endpoint = ELASTICACHE_CLUSTER_IAM_ENDPOINT; // Replace with your cluster endpoint
-
-            // Use the provided endpoint and port
-            let address = redis::ConnectionAddr::Tcp(endpoint.to_string(), 6379);
-
-            // Create IAM connection request
-            let connection_request = create_iam_connection_request(
-                &[address],
-                cluster_name,
-                username,
-                region,
-                None, // Use default refresh interval
-                true, // cluster mode
-                ServiceType::ELASTICACHE,
-            );
-
-            // Attempt to create client with IAM authentication
-            let client_result = Client::new(connection_request.into(), None).await;
-
-            match client_result {
-                Ok(mut client) => {
-                    // Test initial connection with PING
-                    let initial_ping = client.send_command(&mut redis::cmd("PING"), None).await;
-                    assert!(
-                        initial_ping.is_ok(),
-                        "Initial PING should succeed: {initial_ping:?}"
-                    );
-
-                    // Set a test key-value pair to verify functionality
-                    let test_key = generate_random_string(10);
-                    let test_value = generate_random_string(10);
-
-                    let set_result = client
-                        .send_command(redis::cmd("SET").arg(&test_key).arg(&test_value), None)
-                        .await;
-                    assert!(
-                        set_result.is_ok(),
-                        "SET command should succeed: {set_result:?}"
-                    );
-
-                    // Verify the value was set correctly
-                    let get_result = client
-                        .send_command(redis::cmd("GET").arg(&test_key), None)
-                        .await;
-                    assert_eq!(
-                        get_result.unwrap(),
-                        Value::BulkString(test_value.as_bytes().to_vec()),
-                        "GET should return the set value"
-                    );
-
-                    // Wait a moment for the connection validation task to detect and reconnect
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
-                    // Kill all connections to simulate network interruption
-                    kill_connection(&mut client).await;
-
-                    // Test that the client can reconnect and function properly after connection kill
-                    let reconnect_ping = client.send_command(&mut redis::cmd("PING"), None).await;
-                    assert!(
-                        reconnect_ping.is_ok(),
-                        "PING after reconnection should succeed: {reconnect_ping:?}"
-                    );
-
-                    // Verify that we can still retrieve the previously set value after reconnection
-                    let get_after_reconnect = client
-                        .send_command(redis::cmd("GET").arg(&test_key), None)
-                        .await;
-                    assert_eq!(
-                        get_after_reconnect.unwrap(),
-                        Value::BulkString(test_value.as_bytes().to_vec()),
-                        "GET after reconnection should return the same value"
-                    );
-                }
-                Err(err) => {
-                    // In case of failure, print error and assert that it is not a non-connection/auth error
-                    let error_msg = err.to_string();
-                    // If DNS lookup failed, provide a clearer message
-                    if error_msg.contains("failed to lookup address")
-                        || error_msg.contains("Name or service not known")
-                    {
-                        // Uncomment this when you have a real AWS environment
-                        panic!(
-                            "DNS lookup failed: Unable to resolve the address `{}`. Please verify that the endpoint is correct and accessible from your environment.\nError: {}",
-                            endpoint, error_msg
-                        );
-                    }
-
-                    // Other errors will fall here, indicating problems with IAM token generation or connection/auth
-                    // Uncomment this when you have a real AWS environment
-                    panic!(
-                        "Failed to create client with IAM authentication: {}",
-                        error_msg
-                    );
-                }
-            }
-        });
-    }
-
-    #[cfg(feature = "iam_tests")]
-    #[rstest]
-    #[serial_test::serial]
     fn test_iam_refresh_token(#[values(false, true)] use_cluster: bool) {
-        block_on_all(async {
-            remove_test_credentials();
+        block_on_all(async move {
+            // Set mock AWS credentials
+            setup_mock_aws_credentials();
+
+            // Cleanup function to restore original credentials
+            let cleanup = cleanup_mock_aws_credentials;
 
             let cluster_name = if use_cluster {
-                "iam-auth-test"
+                IAM_TEST_CLUSTER_NAME
             } else {
-                "iam-auth-standalone"
+                TEST_STANDALONE_NAME
             };
-            let username = "iam-auth";
-            let region = "us-east-1";
-            let endpoint = if use_cluster {
-                ELASTICACHE_CLUSTER_IAM_ENDPOINT
-            } else {
-                ELASTICACHE_STANDALONE_IAM_ENDPOINT
-            };
+            let username = IAM_USERNAME;
+            let region = IAM_TEST_REGION_US_EAST_1;
 
-            // Use the provided endpoint and port
-            let address = redis::ConnectionAddr::Tcp(endpoint.to_string(), 6379);
-
-            // Create IAM connection request
-            let connection_request = create_iam_connection_request(
-                &[address],
-                cluster_name,
-                username,
-                region,
-                None, // Use default refresh interval
+            // Create test basics with regular authentication first
+            let test_basics = setup_test_basics(
                 use_cluster,
-                ServiceType::ELASTICACHE,
-            );
+                TestConfiguration {
+                    shared_server: true,
+                    ..Default::default()
+                },
+            )
+            .await;
 
-            // Attempt to create client with IAM authentication
+            // Get the server address
+            let address = match &test_basics.server {
+                BackingServer::Standalone(server) => server
+                    .as_ref()
+                    .map(|s| s.get_client_addr())
+                    .unwrap_or(get_shared_server_address(false)),
+                BackingServer::Cluster(cluster) => {
+                    if let Some(cluster) = cluster.as_ref() {
+                        let addresses = cluster.get_server_addresses();
+                        addresses[0].clone()
+                    } else {
+                        // Using shared cluster
+                        let addresses = get_shared_cluster_addresses(false);
+                        addresses[0].clone()
+                    }
+                }
+            };
+
+            // Create IAM connection request with mock credentials
+            let iam_credentials = IamCredentials {
+                cluster_name: cluster_name.into(),
+                region: region.into(),
+                service_type: ServiceType::ELASTICACHE.into(),
+                refresh_interval_seconds: Some(5),
+                ..Default::default()
+            };
+
+            let auth_info = AuthenticationInfo {
+                password: String::new().into(),
+                username: username.into(),
+                iam_credentials: protobuf::MessageField::some(iam_credentials),
+                ..Default::default()
+            };
+
+            let addresses_info = vec![get_address_info(&address)];
+
+            let connection_request = glide_core::connection_request::ConnectionRequest {
+                addresses: addresses_info,
+                tls_mode: TlsMode::NoTls.into(),
+                cluster_mode_enabled: use_cluster,
+                request_timeout: 10000,
+                authentication_info: protobuf::MessageField::some(auth_info),
+                ..Default::default()
+            };
+
+            // Create client with IAM authentication
             let client_result = Client::new(connection_request.into(), None).await;
 
             match client_result {
                 Ok(mut client) => {
-                    // Test initial connection with PING
-                    let initial_ping = client.send_command(&mut redis::cmd("PING"), None).await;
-                    assert!(
-                        initial_ping.is_ok(),
-                        "Initial PING should succeed: {initial_ping:?}"
-                    );
+                    // Test initial connection
+                    assert_connected(&mut client).await;
 
                     // Test manual IAM token refresh
                     let refresh_result = client.refresh_iam_token().await;
@@ -981,12 +932,7 @@ pub(crate) mod shared_client_tests {
                     );
 
                     // Verify that the client still works after token refresh
-                    let post_refresh_ping =
-                        client.send_command(&mut redis::cmd("PING"), None).await;
-                    assert!(
-                        post_refresh_ping.is_ok(),
-                        "PING after token refresh should succeed: {post_refresh_ping:?}"
-                    );
+                    assert_connected(&mut client).await;
 
                     // Test multiple consecutive refreshes
                     for i in 1..=3 {
@@ -997,33 +943,14 @@ pub(crate) mod shared_client_tests {
                         );
 
                         // Verify client still works after each refresh
-                        let ping_result = client.send_command(&mut redis::cmd("PING"), None).await;
-                        assert!(
-                            ping_result.is_ok(),
-                            "PING after refresh #{i} should succeed: {ping_result:?}"
-                        );
-                    }
-                }
-                Err(err) => {
-                    // In case of failure, print error and assert that it is not a non-connection/auth error
-                    let error_msg = err.to_string();
-                    // If DNS lookup failed, provide a clearer message
-                    if error_msg.contains("failed to lookup address")
-                        || error_msg.contains("Name or service not known")
-                    {
-                        // Uncomment this when you have a real AWS environment
-                        panic!(
-                            "DNS lookup failed: Unable to resolve the address `{}`. Please verify that the endpoint is correct and accessible from your environment.\nError: {}",
-                            endpoint, error_msg
-                        );
+                        assert_connected(&mut client).await;
                     }
 
-                    // Other errors will fall here, indicating problems with IAM token generation or connection/auth
-                    // Uncomment this when you have a real AWS environment
-                    panic!(
-                        "Failed to create client with IAM authentication: {}",
-                        error_msg
-                    );
+                    cleanup();
+                }
+                Err(err) => {
+                    cleanup();
+                    panic!("Failed to create client with IAM authentication: {}", err);
                 }
             }
         });
@@ -1039,7 +966,7 @@ pub(crate) mod shared_client_tests {
 
             let cluster_name = "iam-auth-test"; // Replace with your ElastiCache cluster name
             let username = "iam-auth"; // Replace with your IAM username
-            let region = "us-east-1";
+            let region = IAM_TEST_REGION_US_EAST_1;
             let endpoint = ELASTICACHE_CLUSTER_IAM_ENDPOINT; // Replace with your cluster endpoint
 
             // Use the provided endpoint and port
@@ -1062,12 +989,8 @@ pub(crate) mod shared_client_tests {
 
             match client_result {
                 Ok(mut client) => {
-                    // Test initial connection with PING
-                    let initial_ping = client.send_command(&mut redis::cmd("PING"), None).await;
-                    assert!(
-                        initial_ping.is_ok(),
-                        "Initial PING should succeed: {initial_ping:?}"
-                    );
+                    // Test initial connection
+                    assert_connected(&mut client).await;
 
                     // Set a test key-value pair to verify functionality
                     let test_key = generate_random_string(10);
@@ -1101,11 +1024,7 @@ pub(crate) mod shared_client_tests {
                     kill_connection(&mut client).await;
 
                     // Test that the client can reconnect and function properly after connection kill
-                    let reconnect_ping = client.send_command(&mut redis::cmd("PING"), None).await;
-                    assert!(
-                        reconnect_ping.is_ok(),
-                        "PING after reconnection should succeed: {reconnect_ping:?}"
-                    );
+                    assert_connected(&mut client).await;
 
                     // Verify that we can still retrieve the previously set value after reconnection
                     let get_after_reconnect = client
@@ -1157,7 +1076,7 @@ pub(crate) mod shared_client_tests {
 
             let cluster_name = "iam-auth-test"; // Replace with your ElastiCache cluster name
             let username = "iam-auth"; // Replace with your IAM username
-            let region = "us-east-1";
+            let region = IAM_TEST_REGION_US_EAST_1;
             let endpoint = ELASTICACHE_CLUSTER_IAM_ENDPOINT; // Replace with your cluster endpoint
 
             // Use the provided endpoint and port
@@ -1179,14 +1098,10 @@ pub(crate) mod shared_client_tests {
 
             match client_result {
                 Ok(mut client) => {
-                    // Test initial connection with PING
+                    // Test initial connection
 
                     use logger_core::log_info;
-                    let initial_ping = client.send_command(&mut redis::cmd("PING"), None).await;
-                    assert!(
-                        initial_ping.is_ok(),
-                        "Initial PING should succeed: {initial_ping:?}"
-                    );
+                    assert_connected(&mut client).await;
 
                     // Change to 900
                     // wait enough for the token to be expired
@@ -1211,12 +1126,7 @@ pub(crate) mod shared_client_tests {
                     );
 
                     // Verify that the client still works after token refresh
-                    let post_refresh_ping =
-                        client.send_command(&mut redis::cmd("PING"), None).await;
-                    assert!(
-                        post_refresh_ping.is_ok(),
-                        "PING after token refresh should succeed: {post_refresh_ping:?}"
-                    );
+                    assert_connected(&mut client).await;
 
                     // Change to 900
                     // wait enough again for the token to be expired
@@ -1236,12 +1146,7 @@ pub(crate) mod shared_client_tests {
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
                     // Verify that the client still works after token refresh
-                    let post_refresh_ping =
-                        client.send_command(&mut redis::cmd("PING"), None).await;
-                    assert!(
-                        post_refresh_ping.is_ok(),
-                        "PING after token refresh should succeed: {post_refresh_ping:?}"
-                    );
+                    assert_connected(&mut client).await;
                 }
                 Err(err) => {
                     // In case of failure, print error and assert that it is not a non-connection/auth error
@@ -1263,6 +1168,218 @@ pub(crate) mod shared_client_tests {
                         "Failed to create client with IAM authentication: {}",
                         error_msg
                     );
+                }
+            }
+        });
+    }
+
+    #[cfg(feature = "iam_tests")]
+    #[rstest]
+    #[serial_test::serial]
+    #[timeout(SHORT_CLUSTER_TEST_TIMEOUT)]
+    /// Test that verifies IAM authentication persists after an automatic reconnection.
+    /// This test:
+    /// 1. Creates a client with mock IAM credentials
+    /// 2. Verifies the connection works with IAM authentication
+    /// 3. Simulates a connection drop by killing the connection
+    /// 4. Sends another command which either:
+    ///    - Fails due to the dropped connection, then retries and verifies reconnection with IAM auth
+    ///    - Succeeds with a new client ID (indicating reconnection) and verifies still using IAM auth
+    /// This ensures that IAM authentication persists across reconnections.
+    fn test_iam_authentication_persistence_after_reconnection(
+        #[values(false, true)] use_cluster: bool,
+    ) {
+        block_on_all(async move {
+            // Set mock AWS credentials
+            setup_mock_aws_credentials();
+
+            // Cleanup function to restore original credentials
+            let cleanup = cleanup_mock_aws_credentials;
+
+            let cluster_name = if use_cluster {
+                IAM_TEST_CLUSTER_NAME
+            } else {
+                TEST_STANDALONE_NAME
+            };
+            let username = IAM_USERNAME;
+            let region = IAM_TEST_REGION_US_EAST_1;
+
+            // Create test basics with regular authentication first
+            let test_basics = setup_test_basics(
+                use_cluster,
+                TestConfiguration {
+                    shared_server: true,
+                    ..Default::default()
+                },
+            )
+            .await;
+
+            // Get the server address
+            let address = match &test_basics.server {
+                BackingServer::Standalone(server) => server
+                    .as_ref()
+                    .map(|s| s.get_client_addr())
+                    .unwrap_or(get_shared_server_address(false)),
+                BackingServer::Cluster(cluster) => {
+                    if let Some(cluster) = cluster.as_ref() {
+                        let addresses = cluster.get_server_addresses();
+                        addresses[0].clone()
+                    } else {
+                        // Using shared cluster
+                        let addresses = get_shared_cluster_addresses(false);
+                        addresses[0].clone()
+                    }
+                }
+            };
+
+            // Create IAM connection request with mock credentials
+            let iam_credentials = IamCredentials {
+                cluster_name: cluster_name.into(),
+                region: region.into(),
+                service_type: ServiceType::ELASTICACHE.into(),
+                refresh_interval_seconds: Some(5),
+                ..Default::default()
+            };
+
+            let auth_info = AuthenticationInfo {
+                password: String::new().into(),
+                username: username.into(),
+                iam_credentials: protobuf::MessageField::some(iam_credentials),
+                ..Default::default()
+            };
+
+            let addresses_info = vec![get_address_info(&address)];
+
+            let connection_request = glide_core::connection_request::ConnectionRequest {
+                addresses: addresses_info,
+                tls_mode: TlsMode::NoTls.into(),
+                cluster_mode_enabled: use_cluster,
+                request_timeout: 10000,
+                authentication_info: protobuf::MessageField::some(auth_info),
+                ..Default::default()
+            };
+
+            // Create client with IAM authentication
+            let client_result = Client::new(connection_request.into(), None).await;
+
+            match client_result {
+                Ok(mut client) => {
+                    // Verify initial connection works
+                    assert_connected(&mut client).await;
+
+                    // Get initial client info
+                    let mut client_info_cmd = redis::Cmd::new();
+                    client_info_cmd.arg("CLIENT").arg("INFO");
+                    let initial_client_info_response = client
+                        .send_command(&mut client_info_cmd, None)
+                        .await
+                        .unwrap();
+
+                    let initial_client_info = match initial_client_info_response {
+                        Value::BulkString(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+                        Value::VerbatimString { text, .. } => text,
+                        _ => panic!(
+                            "Unexpected CLIENT INFO response type: {:?}",
+                            initial_client_info_response
+                        ),
+                    };
+
+                    let initial_client_id = utilities::extract_client_id(&initial_client_info)
+                        .expect("Failed to extract initial client ID");
+
+                    // Set a test key to verify functionality
+                    let test_key = generate_random_string(10);
+                    let test_value = "iam_test_value";
+                    let set_result = client
+                        .send_command(redis::cmd("SET").arg(&test_key).arg(test_value), None)
+                        .await;
+                    assert!(
+                        set_result.is_ok(),
+                        "SET command should succeed: {set_result:?}"
+                    );
+
+                    // Kill the connection to simulate a network drop
+                    kill_connection(&mut client).await;
+
+                    // Wait a moment for the connection to be fully dropped
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+                    // Try to send another command - this should trigger reconnection
+                    let res = client.send_command(&mut client_info_cmd, None).await;
+                    match res {
+                        Err(err) => {
+                            // Connection was dropped as expected
+                            assert!(
+                                err.is_connection_dropped()
+                                    || err.is_timeout()
+                                    || err.kind() == redis::ErrorKind::AllConnectionsUnavailable,
+                                "Expected connection dropped, timeout, or unavailable error, got: {err:?}",
+                            );
+                            // Retry and verify we can still connect with IAM auth after reconnection
+                            let client_info = repeat_try_create(|| async {
+                                let mut client_clone = client.clone();
+                                let mut cmd = client_info_cmd.clone();
+                                let response =
+                                    client_clone.send_command(&mut cmd, None).await.ok()?;
+                                match response {
+                                    Value::BulkString(bytes) => {
+                                        Some(String::from_utf8_lossy(&bytes).to_string())
+                                    }
+                                    Value::VerbatimString { text, .. } => Some(text),
+                                    _ => None,
+                                }
+                            })
+                            .await;
+
+                            // Verify we got a new client ID (reconnection happened)
+                            let new_client_id = utilities::extract_client_id(&client_info)
+                                .expect("Failed to extract new client ID");
+                            assert_ne!(
+                                initial_client_id, new_client_id,
+                                "Client ID should change after reconnection"
+                            );
+                        }
+                        Ok(response) => {
+                            // Command succeeded after reconnection
+                            let new_client_info = match response {
+                                Value::BulkString(bytes) => {
+                                    String::from_utf8_lossy(&bytes).to_string()
+                                }
+                                Value::VerbatimString { text, .. } => text,
+                                _ => panic!("Unexpected CLIENT INFO response type: {:?}", response),
+                            };
+                            let new_client_id = utilities::extract_client_id(&new_client_info)
+                                .expect("Failed to extract new client ID");
+
+                            // Client ID may or may not change depending on timing
+                            if new_client_id != initial_client_id {
+                                println!(
+                                    "Reconnection detected: client ID changed from {} to {}",
+                                    initial_client_id, new_client_id
+                                );
+                            }
+                        }
+                    }
+
+                    // Verify we can still retrieve the previously set value after reconnection
+                    let get_result = client
+                        .send_command(redis::cmd("GET").arg(&test_key), None)
+                        .await;
+                    assert!(
+                        get_result.is_ok(),
+                        "GET after reconnection should succeed: {get_result:?}"
+                    );
+                    assert_eq!(
+                        get_result.unwrap(),
+                        Value::BulkString(test_value.as_bytes().to_vec()),
+                        "GET should return the same value after reconnection"
+                    );
+
+                    cleanup();
+                }
+                Err(err) => {
+                    cleanup();
+                    panic!("Failed to create client with IAM authentication: {}", err);
                 }
             }
         });
@@ -1733,7 +1850,9 @@ pub(crate) mod shared_client_tests {
                 .blpop(&key2, 2.0)
                 .get(&key2);
 
-            let res = test_basics
+            // Pipeline containing BLPOP with 2s block exceeds the 1s request_timeout,
+            // so it should time out.
+            let result = test_basics
                 .client
                 .send_pipeline(
                     &pipeline,
@@ -1746,12 +1865,13 @@ pub(crate) mod shared_client_tests {
                     },
                 )
                 .await;
+
             assert!(
-                res.is_err(),
-                "Pipeline should fail with blocking command taking too long"
+                result.is_err(),
+                "Pipeline with blocking command exceeding timeout should fail"
             );
-            let err = res.unwrap_err();
-            assert!(err.is_timeout(), "Pipeline should fail with timeout error");
+            let err = result.unwrap_err();
+            assert!(err.is_timeout(), "Expected timeout error, got: {err:?}");
         });
     }
 
@@ -2529,6 +2649,8 @@ pub(crate) mod shared_client_tests {
 
             // Kill the connection to simulate a network drop
             kill_connection(&mut test_basics.client).await;
+            // Allow TCP close to propagate before sending the next command
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
             // Try to send another command - this should trigger reconnection
             let res = test_basics
@@ -2539,8 +2661,10 @@ pub(crate) mod shared_client_tests {
                 Err(err) => {
                     // Connection was dropped as expected
                     assert!(
-                        err.is_connection_dropped() || err.is_timeout(),
-                        "Expected connection dropped or timeout error, got: {err:?}",
+                        err.is_connection_dropped()
+                            || err.is_timeout()
+                            || err.kind() == redis::ErrorKind::AllConnectionsUnavailable,
+                        "Expected connection dropped, timeout, or unavailable error, got: {err:?}",
                     );
                     // Retry and verify we're still on database 5 after reconnection
                     let client_info = repeat_try_create(|| async {
@@ -2559,7 +2683,8 @@ pub(crate) mod shared_client_tests {
                     assert!(client_info.contains("db=5"));
                 }
                 Ok(response) => {
-                    // Command succeeded, extract new client ID and compare
+                    // Command succeeded — reconnection completed within the timeout.
+                    // Extract new client ID and verify it changed (new connection).
                     let new_client_info = match response {
                         Value::BulkString(bytes) => String::from_utf8_lossy(&bytes).to_string(),
                         Value::VerbatimString { text, .. } => text,
@@ -2663,6 +2788,8 @@ pub(crate) mod shared_client_tests {
 
             // Kill the connection to simulate a network drop
             kill_connection(&mut test_basics.client).await;
+            // Allow TCP close to propagate before sending the next command
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
             // Try to send another command - this should trigger reconnection
             let res = test_basics
@@ -2673,8 +2800,10 @@ pub(crate) mod shared_client_tests {
                 Err(err) => {
                     // Connection was dropped as expected
                     assert!(
-                        err.is_connection_dropped() || err.is_timeout(),
-                        "Expected connection dropped or timeout error, got: {err:?}",
+                        err.is_connection_dropped()
+                            || err.is_timeout()
+                            || err.kind() == redis::ErrorKind::AllConnectionsUnavailable,
+                        "Expected connection dropped, timeout, or unavailable error, got: {err:?}",
                     );
                     // Retry and verify we're still on name 2ndName after reconnection
                     let client_info = repeat_try_create(|| async {
@@ -2693,7 +2822,8 @@ pub(crate) mod shared_client_tests {
                     assert!(client_info.contains("name=2ndName"));
                 }
                 Ok(response) => {
-                    // Command succeeded, extract new client ID and compare
+                    // Command succeeded — reconnection completed within the timeout.
+                    // Extract new client ID and verify it changed (new connection).
                     let new_client_info = match response {
                         Value::BulkString(bytes) => String::from_utf8_lossy(&bytes).to_string(),
                         Value::VerbatimString { text, .. } => text,
@@ -2706,8 +2836,317 @@ pub(crate) mod shared_client_tests {
                         "Client ID should change after reconnection if command succeeds"
                     );
                     // Check that the client name is still 2ndName (from CLIENT SETNAME command)
-                    println!("{}", new_client_info);
                     assert!(new_client_info.contains("name=2ndName"));
+                }
+            }
+        });
+    }
+
+    #[rstest]
+    #[serial_test::serial]
+    #[timeout(SHORT_CLUSTER_TEST_TIMEOUT)]
+    /// Test that verifies the client maintains the correct username after an automatic reconnection
+    /// when authentication is changed using the AUTH command.
+    /// This test:
+    /// 1. Creates a client with default authentication
+    /// 2. Uses ACL SETUSER to create a new user "testuser"
+    /// 3. Uses AUTH command to authenticate as "testuser"
+    /// 4. Verifies the connection is authenticated with the correct username
+    /// 5. Simulates a connection drop by killing the connection
+    /// 6. Sends another command which either:
+    ///    - Fails due to the dropped connection, then retries and verifies reconnection with same username
+    ///    - Succeeds with a new client ID (indicating reconnection) and verifies still authenticated with same username
+    /// This ensures that username authentication via AUTH command persists across reconnections.
+    fn test_username_persistence_after_reconnection(#[values(false, true)] use_cluster: bool) {
+        block_on_all(async move {
+            let mut test_basics = setup_test_basics(
+                use_cluster,
+                TestConfiguration {
+                    use_tls: true,
+                    shared_server: false,
+                    connection_info: Some(redis::RedisConnectionInfo {
+                        password: Some("ReallySecurePassword".to_string()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+            let mut client_info_cmd = redis::Cmd::new();
+            client_info_cmd.arg("CLIENT").arg("INFO");
+
+            // Verify initial connection (should be default user)
+            let initial_client_info_response = test_basics
+                .client
+                .send_command(&mut client_info_cmd, None)
+                .await
+                .unwrap();
+
+            let initial_client_info = match initial_client_info_response {
+                Value::BulkString(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+                Value::VerbatimString { text, .. } => text,
+                _ => panic!(
+                    "Unexpected CLIENT INFO response type: {:?}",
+                    initial_client_info_response
+                ),
+            };
+            assert!(initial_client_info.contains("user=default"));
+
+            // Extract initial client ID
+            let initial_client_id = utilities::extract_client_id(&initial_client_info)
+                .expect("Failed to extract initial client ID");
+
+            // Create a new user using ACL SETUSER (automatically routes to all nodes)
+            let mut acl_setuser_cmd = redis::Cmd::new();
+            acl_setuser_cmd
+                .arg("ACL")
+                .arg("SETUSER")
+                .arg("testuser")
+                .arg("on")
+                .arg(">testpassword")
+                .arg("~*")
+                .arg("+@all");
+
+            let acl_result = test_basics
+                .client
+                .send_command(&mut acl_setuser_cmd, None)
+                .await
+                .unwrap();
+
+            // ACL SETUSER routes to all nodes with AllSucceeded policy, which returns a single OK
+            assert_eq!(acl_result, Value::Okay);
+
+            // Execute AUTH command to authenticate as testuser (automatically routes to all nodes)
+            let mut auth_cmd = redis::Cmd::new();
+            auth_cmd.arg("AUTH").arg("testuser").arg("testpassword");
+
+            let auth_result = test_basics
+                .client
+                .send_command(&mut auth_cmd, None)
+                .await
+                .unwrap();
+
+            // AUTH routes to all nodes with AllSucceeded policy, which returns a single OK
+            assert_eq!(auth_result, Value::Okay);
+
+            // Verify we're now authenticated as testuser
+            let post_auth_client_info_response = test_basics
+                .client
+                .send_command(&mut client_info_cmd, None)
+                .await
+                .unwrap();
+
+            let post_auth_client_info = match post_auth_client_info_response {
+                Value::BulkString(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+                Value::VerbatimString { text, .. } => text,
+                _ => panic!(
+                    "Unexpected CLIENT INFO response type: {:?}",
+                    post_auth_client_info_response
+                ),
+            };
+            assert!(post_auth_client_info.contains("user=testuser"));
+
+            // Kill the connection to simulate a network drop
+            kill_connection(&mut test_basics.client).await;
+
+            // Wait a moment for the connection to be fully dropped
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+            // Try to send another command - this should trigger reconnection
+            let res = test_basics
+                .client
+                .send_command(&mut client_info_cmd, None)
+                .await;
+            match res {
+                Err(err) => {
+                    // Connection was dropped as expected
+                    assert!(
+                        err.is_connection_dropped()
+                            || err.is_timeout()
+                            || err.kind() == redis::ErrorKind::AllConnectionsUnavailable,
+                        "Expected connection dropped, timeout, or unavailable error, got: {err:?}",
+                    );
+                    // Retry and verify we're still authenticated with same username after reconnection
+                    let client_info = repeat_try_create(|| async {
+                        let mut client = test_basics.client.clone();
+                        let mut cmd = client_info_cmd.clone();
+                        let response = client.send_command(&mut cmd, None).await.ok()?;
+                        match response {
+                            Value::BulkString(bytes) => {
+                                Some(String::from_utf8_lossy(&bytes).to_string())
+                            }
+                            Value::VerbatimString { text, .. } => Some(text),
+                            _ => None,
+                        }
+                    })
+                    .await;
+                    assert!(client_info.contains("user=testuser"));
+                }
+                Ok(response) => {
+                    // Command succeeded after reconnection, verify username persists
+                    let new_client_info = match response {
+                        Value::BulkString(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+                        Value::VerbatimString { text, .. } => text,
+                        _ => panic!("Unexpected CLIENT INFO response type: {:?}", response),
+                    };
+                    let new_client_id = utilities::extract_client_id(&new_client_info)
+                        .expect("Failed to extract new client ID");
+
+                    // Client ID may or may not change depending on timing
+                    // The important thing is that the username persists
+                    if new_client_id != initial_client_id {
+                        // Reconnection happened and we got a new client ID
+                        println!(
+                            "Reconnection detected: client ID changed from {} to {}",
+                            initial_client_id, new_client_id
+                        );
+                    }
+
+                    // Check that the username is still testuser after reconnection
+                    assert!(new_client_info.contains("user=testuser"));
+                }
+            }
+
+            // Cleanup: delete the test user (automatically routes to all nodes)
+            let mut acl_deluser_cmd = redis::Cmd::new();
+            acl_deluser_cmd.arg("ACL").arg("DELUSER").arg("testuser");
+            let _ = test_basics
+                .client
+                .send_command(&mut acl_deluser_cmd, None)
+                .await;
+        });
+    }
+
+    #[rstest]
+    #[serial_test::serial]
+    #[timeout(SHORT_CLUSTER_TEST_TIMEOUT)]
+    /// Test that verifies the client maintains the correct protocol version after an automatic reconnection
+    /// when the protocol is changed using the HELLO command.
+    /// This test:
+    /// 1. Creates a client with RESP2 protocol
+    /// 2. Uses HELLO command to change to RESP3
+    /// 3. Verifies the connection is using RESP3 (proto=3)
+    /// 4. Simulates a connection drop by killing the connection
+    /// 5. Sends another command which either:
+    ///    - Fails due to the dropped connection, then retries and verifies reconnection with RESP3
+    ///    - Succeeds with a new client ID (indicating reconnection) and verifies still using RESP3
+    /// This ensures that protocol version changed via HELLO command persists across reconnections.
+    fn test_protocol_persistence_after_reconnection(#[values(false, true)] use_cluster: bool) {
+        block_on_all(async move {
+            let mut test_basics = setup_test_basics(
+                use_cluster,
+                TestConfiguration {
+                    shared_server: true,
+                    connection_info: Some(RedisConnectionInfo {
+                        protocol: redis::ProtocolVersion::RESP2,
+                        ..Default::default()
+                    }),
+                    protocol: ProtocolVersion::RESP2,
+                    ..Default::default()
+                },
+            )
+            .await;
+
+            let mut hello_cmd = redis::Cmd::new();
+            hello_cmd.arg("HELLO");
+
+            // Verify initial connection is using RESP2
+            let initial_hello_response = test_basics
+                .client
+                .send_command(&mut hello_cmd, None)
+                .await
+                .unwrap();
+
+            let initial_hello: std::collections::HashMap<String, Value> =
+                redis::from_owned_redis_value(initial_hello_response).unwrap();
+            assert_eq!(initial_hello.get("proto").unwrap(), &Value::Int(2));
+
+            // Get initial client ID
+            let mut client_info_cmd = redis::Cmd::new();
+            client_info_cmd.arg("CLIENT").arg("INFO");
+            let initial_client_info_response = test_basics
+                .client
+                .send_command(&mut client_info_cmd, None)
+                .await
+                .unwrap();
+
+            let initial_client_info = match initial_client_info_response {
+                Value::BulkString(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+                Value::VerbatimString { text, .. } => text,
+                _ => panic!(
+                    "Unexpected CLIENT INFO response type: {:?}",
+                    initial_client_info_response
+                ),
+            };
+            let initial_client_id = utilities::extract_client_id(&initial_client_info)
+                .expect("Failed to extract initial client ID");
+
+            // Use HELLO command to change to RESP3
+            let mut hello_3_cmd = redis::Cmd::new();
+            hello_3_cmd.arg("HELLO").arg("3");
+            let hello_3_response = test_basics
+                .client
+                .send_command(&mut hello_3_cmd, None)
+                .await
+                .unwrap();
+
+            let hello_3_result: std::collections::HashMap<String, Value> =
+                redis::from_owned_redis_value(hello_3_response).unwrap();
+            assert_eq!(hello_3_result.get("proto").unwrap(), &Value::Int(3));
+
+            // Kill the connection to simulate a network drop
+            kill_connection(&mut test_basics.client).await;
+            // Allow TCP close to propagate before sending the next command
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+            // Try to send another command - this should trigger reconnection
+            let res = test_basics.client.send_command(&mut hello_cmd, None).await;
+            match res {
+                Err(err) => {
+                    // Connection was dropped as expected
+                    assert!(
+                        err.is_connection_dropped()
+                            || err.is_timeout()
+                            || err.kind() == redis::ErrorKind::AllConnectionsUnavailable,
+                        "Expected connection dropped, timeout, or unavailable error, got: {err:?}",
+                    );
+                    // Retry and verify we're still using RESP3 after reconnection
+                    let hello_info = repeat_try_create(|| async {
+                        let mut client = test_basics.client.clone();
+                        let mut cmd = hello_cmd.clone();
+                        let response = client.send_command(&mut cmd, None).await.ok()?;
+                        redis::from_owned_redis_value::<std::collections::HashMap<String, Value>>(
+                            response,
+                        )
+                        .ok()
+                    })
+                    .await;
+                    assert_eq!(hello_info.get("proto").unwrap(), &Value::Int(3));
+                }
+                Ok(response) => {
+                    // Command succeeded — reconnection completed within the timeout.
+                    let new_hello: std::collections::HashMap<String, Value> =
+                        redis::from_owned_redis_value(response).unwrap();
+                    assert_eq!(new_hello.get("proto").unwrap(), &Value::Int(3));
+
+                    // Verify client ID changed (indicating reconnection)
+                    let new_client_info_response = test_basics
+                        .client
+                        .send_command(&mut client_info_cmd, None)
+                        .await
+                        .unwrap();
+                    let new_client_info = match new_client_info_response {
+                        Value::BulkString(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+                        Value::VerbatimString { text, .. } => text,
+                        _ => panic!("Unexpected CLIENT INFO response type"),
+                    };
+                    let new_client_id = utilities::extract_client_id(&new_client_info)
+                        .expect("Failed to extract new client ID");
+                    assert_ne!(
+                        initial_client_id, new_client_id,
+                        "Client ID should change after reconnection if command succeeds"
+                    );
                 }
             }
         });

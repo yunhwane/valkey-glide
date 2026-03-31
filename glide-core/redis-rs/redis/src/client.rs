@@ -7,7 +7,7 @@ use crate::{
     connection::{connect, Connection, ConnectionInfo, ConnectionLike, IntoConnectionInfo},
     push_manager::PushInfo,
     retry_strategies::RetryStrategy,
-    types::{RedisResult, Value},
+    types::{ProtocolVersion, RedisResult, Value},
 };
 #[cfg(feature = "aio")]
 use std::net::IpAddr;
@@ -103,6 +103,20 @@ pub struct GlideConnectionOptions {
     pub tcp_nodelay: bool,
     /// Optional PubSub synchronizer for managing subscription state
     pub pubsub_synchronizer: Option<Arc<dyn PubSubSynchronizer>>,
+    /// Optional async callback that returns a valid IAM token for authentication.
+    /// When set, the cluster reconnection loop will invoke this callback before each
+    /// connection attempt to ensure the password uses fresh credentials.
+    /// The callback should return `Some(token)` if a valid token is available,
+    /// or `None` if token retrieval failed.
+    pub iam_token_provider: Option<Arc<dyn IAMTokenProvider>>,
+}
+
+/// Trait for providing IAM tokens to the reconnection path.
+/// Implemented by the IAM token handle in glide-core.
+#[async_trait::async_trait]
+pub trait IAMTokenProvider: Send + Sync {
+    /// Returns a valid token, refreshing it if expired.
+    async fn get_valid_token(&self) -> Option<String>;
 }
 
 /// To enable async support you need to enable the feature: `tokio-comp`
@@ -601,6 +615,34 @@ impl Client {
     /// Updates the client_name in connection_info.
     pub fn update_client_name(&mut self, client_name: Option<String>) {
         self.connection_info.redis.client_name = client_name;
+    }
+
+    /// Updates the username in connection_info.
+    ///
+    /// This method updates the username field in the connection information,
+    /// which will be used for subsequent connections and reconnections.
+    /// Typically updated when AUTH command is used with a username.
+    ///
+    /// # Arguments
+    ///
+    /// * `username` - The username to use for authentication (None to clear)
+    ///
+    pub fn update_username(&mut self, username: Option<String>) {
+        self.connection_info.redis.username = username;
+    }
+
+    /// Updates the protocol version in connection_info.
+    ///
+    /// This method updates the protocol field in the connection information,
+    /// which will be used for subsequent connections and reconnections.
+    /// Typically updated when HELLO command is used to change protocol version.
+    ///
+    /// # Arguments
+    ///
+    /// * `protocol` - The protocol version to use (RESP2 or RESP3)
+    ///
+    pub fn update_protocol(&mut self, protocol: ProtocolVersion) {
+        self.connection_info.redis.protocol = protocol;
     }
 }
 

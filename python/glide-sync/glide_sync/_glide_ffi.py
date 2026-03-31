@@ -117,6 +117,20 @@ class _GlideFFI:
                 uint64_t span_ptr
             );
 
+            CommandResult* command_with_buffer(
+                const void* client_adapter_ptr,
+                uintptr_t request_id,
+                int command_type,
+                unsigned long arg_count,
+                const size_t *args,
+                const unsigned long* args_len,
+                const unsigned char* route_bytes,
+                size_t route_bytes_len,
+                uint8_t* target_buf,
+                size_t target_len,
+                uint64_t span_ptr
+            );
+
             CommandResult* invoke_script(
                 const void* client_adapter_ptr,
                 uintptr_t request_id,
@@ -302,6 +316,8 @@ class _GlideFFI:
                 unsigned long total_bytes_compressed;
                 unsigned long total_bytes_decompressed;
                 unsigned long compression_skipped_count;
+                unsigned long subscription_out_of_sync_count;
+                unsigned long subscription_last_sync_timestamp;
             } Statistics;
 
             Statistics get_statistics();
@@ -323,3 +339,7 @@ class _GlideFFI:
     def lib(self):
         """Access to the loaded library for calling functions."""
         return self._lib
+
+
+# Singleton instance accessor
+GlideFFI = _GlideFFI()

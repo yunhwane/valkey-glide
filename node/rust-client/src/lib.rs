@@ -557,6 +557,39 @@ pub fn create_leaked_otel_span(name: String) -> [u32; 2] {
     split_pointer(s)
 }
 
+/// Creates an open telemetry span with the given name as a child of a remote span context.
+/// Falls back to creating a standalone span if the trace context is invalid.
+#[napi(ts_return_type = "[number, number]")]
+pub fn create_otel_span_with_trace_context(
+    name: String,
+    trace_id: String,
+    span_id: String,
+    trace_flags: u8,
+    trace_state: Option<String>,
+) -> [u32; 2] {
+    let span = match GlideSpan::new_with_remote_context(
+        &name,
+        &trace_id,
+        &span_id,
+        trace_flags,
+        trace_state.as_deref(),
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            log(
+                Level::Warn,
+                "OpenTelemetry".to_string(),
+                format!(
+                    "Failed to create span with remote context, falling back to standalone span: {e}"
+                ),
+            );
+            GlideOpenTelemetry::new_span(&name)
+        }
+    };
+    let s = Arc::into_raw(Arc::new(span)) as *mut GlideSpan;
+    split_pointer(s)
+}
+
 #[napi]
 pub fn drop_otel_span(span_ptr: BigInt) {
     let (is_negative, span_ptr, lossless) = span_ptr.get_u64();
@@ -692,6 +725,9 @@ pub fn get_statistics(env: Env) -> Result<JsObject> {
     let total_bytes_compressed = Telemetry::total_bytes_compressed().to_string();
     let total_bytes_decompressed = Telemetry::total_bytes_decompressed().to_string();
     let compression_skipped_count = Telemetry::compression_skipped_count().to_string();
+    let subscription_out_of_sync_count = Telemetry::subscription_out_of_sync_count().to_string();
+    let subscription_last_sync_timestamp =
+        Telemetry::subscription_last_sync_timestamp().to_string();
 
     let mut stats: JsObject = env.create_object()?;
     stats.set_named_property("total_connections", total_connections)?;
@@ -702,6 +738,14 @@ pub fn get_statistics(env: Env) -> Result<JsObject> {
     stats.set_named_property("total_bytes_compressed", total_bytes_compressed)?;
     stats.set_named_property("total_bytes_decompressed", total_bytes_decompressed)?;
     stats.set_named_property("compression_skipped_count", compression_skipped_count)?;
+    stats.set_named_property(
+        "subscription_out_of_sync_count",
+        subscription_out_of_sync_count,
+    )?;
+    stats.set_named_property(
+        "subscription_last_sync_timestamp",
+        subscription_last_sync_timestamp,
+    )?;
 
     Ok(stats)
 }
